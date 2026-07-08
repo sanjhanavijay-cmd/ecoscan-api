@@ -31,7 +31,7 @@ except Exception as e:
     print(f"Firebase init failed: {e}")
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.5-flash")
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 app = Flask(__name__)
 
