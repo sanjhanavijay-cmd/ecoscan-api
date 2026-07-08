@@ -1,12 +1,11 @@
 """
-EcoScan Cloud API — deployed to Railway
+EcoScan Cloud API — deployed to Render
 Handles AI analysis and phone validation for EcoScan APK
 """
 
 from flask import Flask, request, jsonify
-import google.generativeai as genai
 from PIL import Image
-import io, re, base64, os, json, hashlib
+import io, re, base64, os, json, traceback, requests as req_lib
 from datetime import datetime
 import firebase_admin
 from firebase_admin import credentials as fb_creds, db as fb_db
@@ -14,8 +13,9 @@ from firebase_admin import credentials as fb_creds, db as fb_db
 # ── Config ──────────────────────────────────────────────────────────────────
 GEMINI_API_KEY  = os.environ.get('GEMINI_API_KEY', 'AIzaSyByniWxqOLfX51z1yHSLH1-1vOWh8v9ojo')
 FIREBASE_DB_URL = os.environ.get('FIREBASE_DB_URL', 'https://earnx-db-default-rtdb.firebaseio.com')
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
 
-# Firebase init from env var (JSON string) or local file
+# Firebase init
 _fb_ok = False
 try:
     sa_json = os.environ.get('FIREBASE_SA_JSON')
@@ -30,9 +30,6 @@ try:
 except Exception as e:
     print(f"Firebase init failed: {e}")
 
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash")
-
 app = Flask(__name__)
 
 @app.after_request
@@ -42,11 +39,21 @@ def cors(response):
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
     return response
 
-@app.route('/api/<path:p>', methods=['OPTIONS'])
 @app.route('/<path:p>', methods=['OPTIONS'])
 def options(p): return '', 200
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+def call_gemini(prompt, image_b64):
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": image_b64}}
+            ]
+        }]
+    }
+    r = req_lib.post(GEMINI_URL, json=payload, timeout=30)
+    r.raise_for_status()
+    return r.json()['candidates'][0]['content']['parts'][0]['text']
 
 def extract_section(title, text):
     lines = text.splitlines(); collecting = False; content = []
@@ -98,8 +105,6 @@ def normalize_phone(p):
     if p.startswith("0") and len(p) == 11: p = p[1:]
     return p
 
-# ── Routes ───────────────────────────────────────────────────────────────────
-
 @app.route('/')
 def index():
     return jsonify({'status': 'EcoScan Cloud API running'})
@@ -114,8 +119,9 @@ def analyze():
         img_bytes = base64.b64decode(img_b64)
         pil = Image.open(io.BytesIO(img_bytes)).convert('RGB')
         buf = io.BytesIO()
-        pil.save(buf, format='JPEG', quality=85)
+        pil.save(buf, format='JPEG', quality=75)
         buf.seek(0)
+        compressed_b64 = base64.b64encode(buf.getvalue()).decode()
 
         prompt = """You are an e-waste recycling expert in India.
 Respond using EXACTLY:
@@ -130,8 +136,8 @@ Recoverable Materials:
 - ...
 - ...
 """
-        resp = model.generate_content([prompt, {"mime_type": "image/jpeg", "data": buf.getvalue()}])
-        text = resp.text
+        text = call_gemini(prompt, compressed_b64)
+        print(f"Gemini response: {text[:200]}")
 
         name      = (extract_section("Object Name", text) or ["Unknown E-Waste"])[0]
         category  = (extract_section("Category", text) or ["Unknown"])[0]
@@ -146,6 +152,7 @@ Recoverable Materials:
             'value': value, 'weight_kg': weight
         })
     except Exception as e:
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/validate_phone', methods=['POST'])
@@ -187,6 +194,7 @@ def validate_phone():
             }
         })
     except Exception as e:
+        traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)})
 
 if __name__ == '__main__':
